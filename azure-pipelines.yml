@@ -1,0 +1,81 @@
+trigger:
+  - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  SONARQUBE_PROJECT_KEY: 'your-sonarqube-project-key'  # Replace with your SonarQube project key
+  SONARQUBE_HOST_URL: 'http://your-sonarqube-server-url'  # Replace with your SonarQube server URL
+  SONARQUBE_AUTH_TOKEN: '$(SONARQUBE_AUTH_TOKEN)'  # Token stored securely in Azure DevOps
+  IMAGE_NAME: 'simple-java-app'  # Name of the sample image to scan
+  CRITICAL_ISSUES_THRESHOLD: 10  # Threshold for critical issues
+
+steps:
+# Step 1: Checkout the source code
+- checkout: self
+
+# Step 2: Prepare SonarQube analysis
+- task: SonarQubePrepare@5
+  inputs:
+    SonarQube: 'SonarQubeConnection'  # Name of the SonarQube service connection
+    scannerMode: 'CLI'
+    configMode: 'manual'
+    cliProjectKey: '$(SONARQUBE_PROJECT_KEY)'
+    cliProjectName: 'MyProject'
+    cliSources: '.'
+    extraProperties: |
+      sonar.host.url=$(SONARQUBE_HOST_URL)
+      sonar.login=$(SONARQUBE_AUTH_TOKEN)
+
+# Step 3: Build Docker image
+- task: Docker@2
+  displayName: 'Build Docker Image'
+  inputs:
+    containerRegistry: 'yourContainerRegistryServiceConnection'
+    repository: '$(IMAGE_NAME)'
+    command: 'build'
+    Dockerfile: '**/Dockerfile'
+    tags: 'latest'
+
+# Step 4: Run SonarQube scan on the Docker image
+- script: |
+    echo "Scanning Docker image using SonarQube"
+    docker run --rm -v "$(PWD)/sonar-scanner-cli:/opt/sonar-scanner-cli" \
+      -e SONAR_HOST_URL=$(SONARQUBE_HOST_URL) \
+      -e SONAR_LOGIN=$(SONARQUBE_AUTH_TOKEN) \
+      sonarsource/sonar-scanner-cli:latest \
+      sonar-scanner \
+      -Dsonar.projectKey=$(SONARQUBE_PROJECT_KEY) \
+      -Dsonar.sources=.
+  displayName: 'Scan Docker image with SonarQube'
+
+# Step 5: Run SonarQube scan on JAR files
+- script: |
+    echo "Running SonarQube scan on JAR files"
+    sonar-scanner \
+      -Dsonar.projectKey=$(SONARQUBE_PROJECT_KEY) \
+      -Dsonar.sources=. \
+      -Dsonar.java.binaries=**/*.jar \
+      -Dsonar.host.url=$(SONARQUBE_HOST_URL) \
+      -Dsonar.login=$(SONARQUBE_AUTH_TOKEN)
+  displayName: 'Run SonarQube scan on JAR files'
+
+# Step 6: Publish SonarQube analysis report
+- task: SonarQubePublish@5
+  inputs:
+    pollingTimeoutSec: '300'
+  displayName: 'Publish SonarQube Analysis Report'
+
+# Step 7: Check for critical issues and fail the pipeline if needed
+- script: |
+    # Check for critical issues
+    criticalIssues=$(curl -u $(SONARQUBE_AUTH_TOKEN): $(SONARQUBE_HOST_URL)/api/issues/search?severities=CRITICAL&componentKeys=$(SONARQUBE_PROJECT_KEY) | jq '.total')
+    echo "Critical issues found: $criticalIssues"
+    if [ "$criticalIssues" -gt $(CRITICAL_ISSUES_THRESHOLD) ]; then
+      echo "Failing pipeline due to more than $(CRITICAL_ISSUES_THRESHOLD) critical issues found"
+      exit 1
+    else
+      echo "Pipeline passed with $criticalIssues critical issues"
+    fi
+  displayName: 'Check critical issues in SonarQube report'
